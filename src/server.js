@@ -201,12 +201,17 @@ async function startGateway() {
     OPENCLAW_GATEWAY_TOKEN,
   ];
 
+  // Check if Vertex AI service account exists and set credentials
+  const vertexAiKeyPath = path.join(STATE_DIR, "vertex-ai-key.json");
+  const vertexAiCredentials = fs.existsSync(vertexAiKeyPath) ? vertexAiKeyPath : null;
+
   gatewayProc = childProcess.spawn(OPENCLAW_NODE, clawArgs(args), {
     stdio: "inherit",
     env: {
       ...process.env,
       OPENCLAW_STATE_DIR: STATE_DIR,
       OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+      ...(vertexAiCredentials && { GOOGLE_APPLICATION_CREDENTIALS: vertexAiCredentials }),
     },
   });
 
@@ -355,8 +360,9 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
     {
       value: "google",
       label: "Google",
-      hint: "Gemini API key + OAuth",
+      hint: "Vertex AI (service account) + Gemini API key + OAuth",
       options: [
+        { value: "google-vertex-ai-service-account", label: "Google Vertex AI (service account JSON)" },
         { value: "gemini-api-key", label: "Google Gemini API key" },
         { value: "google-antigravity", label: "Google Antigravity OAuth" },
         { value: "google-gemini-cli", label: "Google Gemini CLI OAuth" },
@@ -507,6 +513,7 @@ function runCmd(cmd, args, opts = {}) {
         ...process.env,
         OPENCLAW_STATE_DIR: STATE_DIR,
         OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+        ...(opts.env || {}),
       },
     });
 
@@ -540,13 +547,37 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
     const payload = req.body || {};
     const onboardArgs = buildOnboardArgs(payload);
 
+    // Handle Vertex AI service account JSON
+    let vertexAiKeyPath = null;
+    if (payload.authChoice === "google-vertex-ai-service-account" && payload.authSecret?.trim()) {
+      try {
+        const keyJson = JSON.parse(payload.authSecret.trim());
+        vertexAiKeyPath = path.join(STATE_DIR, "vertex-ai-key.json");
+        fs.writeFileSync(vertexAiKeyPath, JSON.stringify(keyJson, null, 2), { encoding: "utf8", mode: 0o600 });
+        console.log(`[vertex-ai] Stored service account key to ${vertexAiKeyPath}`);
+      } catch (err) {
+        console.error(`[vertex-ai] Failed to parse JSON key: ${err.message}`);
+        return res.status(400).json({ 
+          ok: false, 
+          output: `[ERROR] Invalid Vertex AI service account JSON: ${err.message}\n` 
+        });
+      }
+    }
+
     // DIAGNOSTIC: Log token we're passing to onboard
     console.log(`[onboard] ========== TOKEN DIAGNOSTIC START ==========`);
     console.log(`[onboard] Wrapper token (from env/file/generated): ${OPENCLAW_GATEWAY_TOKEN.slice(0, 16)}... (length: ${OPENCLAW_GATEWAY_TOKEN.length})`);
     console.log(`[onboard] Onboard command args include: --gateway-token ${OPENCLAW_GATEWAY_TOKEN.slice(0, 16)}...`);
     console.log(`[onboard] Full onboard command: node ${clawArgs(onboardArgs).join(' ').replace(OPENCLAW_GATEWAY_TOKEN, OPENCLAW_GATEWAY_TOKEN.slice(0, 16) + '...')}`);
 
-    const onboard = await runCmd(OPENCLAW_NODE, clawArgs(onboardArgs));
+    const onboard = await runCmd(OPENCLAW_NODE, clawArgs(onboardArgs), {
+      env: {
+        ...process.env,
+        OPENCLAW_STATE_DIR: STATE_DIR,
+        OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+        ...(vertexAiKeyPath && { GOOGLE_APPLICATION_CREDENTIALS: vertexAiKeyPath }),
+      },
+    });
 
     let extra = "";
 
